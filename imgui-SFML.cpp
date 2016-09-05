@@ -10,6 +10,8 @@
 #include <SFML/Window/Event.hpp>
 #include <SFML/Window/Window.hpp>
 
+#include "examples/imconfig.h"
+
 #include <cstddef> // offsetof, NULL
 
 static sf::Window* s_window = NULL;
