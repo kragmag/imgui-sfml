@@ -250,6 +250,13 @@ bool ImageButton(const sf::Texture& texture, const sf::Vector2f& size,
     sf::Vector2f textureSize = static_cast<sf::Vector2f>(texture.getSize());
     return ::imageButtonImpl(texture, sf::FloatRect(0.f, 0.f, textureSize.x, textureSize.y), size, framePadding, bgColor, tintColor);
 }
+    
+bool ImageButton(const sf::Texture& texture, const sf::Vector2f& size, const sf::FloatRect& textureRect,
+                     const int framePadding, const sf::Color& bgColor, const sf::Color& tintColor)
+{
+    return ::imageButtonImpl(texture, textureRect, size, framePadding, bgColor, tintColor);
+}
+    
 
 bool ImageButton(const sf::Sprite& sprite,
     const int framePadding, const sf::Color& bgColor, const sf::Color& tintColor)
@@ -265,6 +272,8 @@ bool ImageButton(const sf::Sprite& sprite, const sf::Vector2f& size,
     if (!texturePtr) { return false; }
     return ::imageButtonImpl(*texturePtr, static_cast<sf::FloatRect>(sprite.getTextureRect()), size, framePadding, bgColor, tintColor);
 }
+    
+    
 
 /////////////// Draw_list Overloads
 
