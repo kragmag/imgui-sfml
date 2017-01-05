@@ -13,23 +13,20 @@
 #include "examples/imconfig.h"
 
 #include <cstddef> // offsetof, NULL
+#include <cassert>
 
-static sf::Window* s_window = NULL;
-static sf::RenderTarget* s_renderTarget = NULL;
-static sf::Texture* s_fontTexture = NULL;
+// Supress warnings caused by converting from uint to void* in pCmd->TextureID
+#ifdef __clang__
+#pragma clang diagnostic ignored "-Wint-to-void-pointer-cast" // warning : cast to 'void *' from smaller integer type 'int'
+#elif defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wint-to-pointer-cast"      // warning: cast to pointer from integer of different size
+#endif
+
 static bool s_windowHasFocus = true;
-
-static bool s_mousePressed[5] = { false, false, false, false, false };
-
+static bool s_mousePressed[3] = { false, false, false };
+static sf::Texture* s_fontTexture = NULL; // owning pointer to internal font atlas which is used if user doesn't set custom sf::Texture.
 namespace
 {
-
-ImVec2 getDisplaySize()
-{
-    assert(s_renderTarget);
-    sf::Vector2f size = static_cast<sf::Vector2f>(s_renderTarget->getSize());
-    return ImVec2(size);
-}
 
 ImVec2 getTopLeftAbsolute(const sf::FloatRect& rect);
 ImVec2 getDownRightAbsolute(const sf::FloatRect& rect);
@@ -47,10 +44,8 @@ namespace ImGui
 namespace SFML
 {
 
-void Init(sf::Window& window, sf::RenderTarget& target)
+void Init(sf::RenderTarget& target, sf::Texture* fontTexture)
 {
-    s_window = &window;
-
     ImGuiIO& io = ImGui::GetIO();
 
     // init keyboard mapping
@@ -59,6 +54,8 @@ void Init(sf::Window& window, sf::RenderTarget& target)
     io.KeyMap[ImGuiKey_RightArrow] = sf::Keyboard::Right;
     io.KeyMap[ImGuiKey_UpArrow] = sf::Keyboard::Up;
     io.KeyMap[ImGuiKey_DownArrow] = sf::Keyboard::Down;
+    io.KeyMap[ImGuiKey_PageUp] = sf::Keyboard::PageUp;
+    io.KeyMap[ImGuiKey_PageDown] = sf::Keyboard::PageDown;
     io.KeyMap[ImGuiKey_Home] = sf::Keyboard::Home;
     io.KeyMap[ImGuiKey_End] = sf::Keyboard::End;
     io.KeyMap[ImGuiKey_Delete] = sf::Keyboard::Delete;
@@ -73,32 +70,20 @@ void Init(sf::Window& window, sf::RenderTarget& target)
     io.KeyMap[ImGuiKey_Z] = sf::Keyboard::Z;
 
     // init rendering
-    s_renderTarget = &target;
-    io.DisplaySize = getDisplaySize();
+    io.DisplaySize = static_cast<sf::Vector2f>(target.getSize());
     io.RenderDrawListsFn = RenderDrawLists; // set render callback
 
-    // create font texture
-    unsigned char* pixels;
-    int width, height;
-    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    if (fontTexture == NULL) {
+        if (s_fontTexture) { // delete previously created texture
+            delete s_fontTexture;
+        }
 
-    if (s_fontTexture) { // was already created, delete it
-        delete s_fontTexture;
-        s_fontTexture = NULL;
+        s_fontTexture = new sf::Texture;
+        createFontTexture(*s_fontTexture);
+        setFontTexture(*s_fontTexture);
+    } else {
+        setFontTexture(*fontTexture);
     }
-
-    s_fontTexture = new sf::Texture;
-    s_fontTexture->create(width, height);
-    s_fontTexture->update(pixels);
-    io.Fonts->TexID = (void*)s_fontTexture;
-
-    io.Fonts->ClearInputData();
-    io.Fonts->ClearTexData();
-}
-
-void Init(sf::RenderWindow& window)
-{
-    Init(window, window);
 }
 
 void ProcessEvent(const sf::Event& event)
@@ -109,7 +94,13 @@ void ProcessEvent(const sf::Event& event)
         {
             case sf::Event::MouseButtonPressed: // fall-through
             case sf::Event::MouseButtonReleased:
-                s_mousePressed[event.mouseButton.button] = (event.type == sf::Event::MouseButtonPressed);
+                {
+                    int button = event.mouseButton.button;
+                    if (event.type == sf::Event::MouseButtonPressed &&
+                        button >= 0 && button < 3) {
+                        s_mousePressed[event.mouseButton.button] = true;
+                    }
+                }
                 break;
             case sf::Event::MouseWheelMoved:
                 io.MouseWheel += static_cast<float>(event.mouseWheel.delta);
@@ -123,7 +114,7 @@ void ProcessEvent(const sf::Event& event)
                 break;
             case sf::Event::TextEntered:
                 if (event.text.unicode > 0 && event.text.unicode < 0x10000) {
-                    io.AddInputCharacter(event.text.unicode);
+                    io.AddInputCharacter(static_cast<ImWchar>(event.text.unicode));
                 }
                 break;
             default:
@@ -144,46 +135,69 @@ void ProcessEvent(const sf::Event& event)
     }
 }
 
-void Update(sf::Time dt)
+void Update(sf::RenderWindow& window, sf::Time dt)
+{
+    Update(window, window, dt);
+}
+
+void Update(sf::Window& window, sf::RenderTarget& target, sf::Time dt)
+{
+    Update(sf::Mouse::getPosition(window), static_cast<sf::Vector2f>(target.getSize()), dt);
+    window.setMouseCursorVisible(!ImGui::GetIO().MouseDrawCursor); // don't draw mouse cursor if ImGui draws it
+}
+
+void Update(const sf::Vector2i& mousePos, const sf::Vector2f& displaySize, sf::Time dt)
 {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = getDisplaySize();
+    io.DisplaySize = displaySize;
     io.DeltaTime = dt.asSeconds();
-    s_window->setMouseCursorVisible(!io.MouseDrawCursor); // don't draw mouse cursor if ImGui draws it
 
-    // update mouse
-    assert(s_window);
     if (s_windowHasFocus) {
-        io.MousePos = sf::Mouse::getPosition(*s_window);
-        io.MouseDown[0] = s_mousePressed[0] || sf::Mouse::isButtonPressed(sf::Mouse::Left);
-        io.MouseDown[1] = s_mousePressed[1] || sf::Mouse::isButtonPressed(sf::Mouse::Right);
-        io.MouseDown[2] = s_mousePressed[2] || sf::Mouse::isButtonPressed(sf::Mouse::Middle);
-        s_mousePressed[0] = s_mousePressed[1] = s_mousePressed[2] = false;
+        io.MousePos = mousePos;
+        for (int i = 0; i < 3; ++i) {
+            io.MouseDown[i] = s_mousePressed[i] || sf::Mouse::isButtonPressed((sf::Mouse::Button)i);
+            s_mousePressed[i] = false;
+        }
     }
 
+    assert(io.Fonts->Fonts.Size > 0); // You forgot to create and set up font atlas (see createFontTexture)
     ImGui::NewFrame();
 }
 
 void Shutdown()
 {
+    ImGui::GetIO().Fonts->TexID = NULL;
+
+    if (s_fontTexture) { // if internal texture was created, we delete it
+        delete s_fontTexture;
+        s_fontTexture = NULL;
+    }
+
+    ImGui::Shutdown(); // need to specify namespace here, otherwise ImGui::SFML::Shutdown would be called
+}
+
+void createFontTexture(sf::Texture& texture)
+{
+    unsigned char* pixels;
+    int width, height;
+
     ImGuiIO& io = ImGui::GetIO();
-    io.Fonts->TexID = NULL;
-    delete s_fontTexture;
-    s_fontTexture = NULL;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
 
-    s_renderTarget = NULL;
-    s_window = NULL;
-    ImGui::Shutdown(); // need to specify namespace here, because compiler will call ImGui::SFML::Shutdown here!
+    texture.create(width, height);
+    texture.update(pixels);
+
+    io.Fonts->ClearInputData();
+    io.Fonts->ClearTexData();
 }
 
-void SetWindow(sf::Window& window)
+void setFontTexture(sf::Texture& texture)
 {
-    s_window = &window;
-}
-
-void SetRenderTarget(sf::RenderTarget& target)
-{
-    s_renderTarget = &target;
+    ImGui::GetIO().Fonts->TexID = (void*)texture.getNativeHandle();
+    if (&texture != s_fontTexture) { // internal texture is not needed anymore
+        delete s_fontTexture;
+        s_fontTexture = NULL;
+    }
 }
 
 } // end of namespace SFML
@@ -200,7 +214,7 @@ void Image(const sf::Texture& texture,
 void Image(const sf::Texture& texture, const sf::Vector2f& size,
     const sf::Color& tintColor, const sf::Color& borderColor)
 {
-    ImGui::Image((void*)&texture, size, ImVec2(0, 0), ImVec2(1, 1), tintColor, borderColor);
+    ImGui::Image((void*)texture.getNativeHandle(), size, ImVec2(0, 0), ImVec2(1, 1), tintColor, borderColor);
 }
 
 void Image(const sf::Texture& texture, const sf::FloatRect& textureRect,
@@ -216,7 +230,7 @@ void Image(const sf::Texture& texture, const sf::Vector2f& size, const sf::Float
     ImVec2 uv0(textureRect.left / textureSize.x, textureRect.top / textureSize.y);
     ImVec2 uv1((textureRect.left + textureRect.width) / textureSize.x,
         (textureRect.top + textureRect.height) / textureSize.y);
-    ImGui::Image((void*)&texture, size, uv0, uv1, tintColor, borderColor);
+    ImGui::Image((void*)texture.getNativeHandle(), size, uv0, uv1, tintColor, borderColor);
 }
 
 void Image(const sf::Sprite& sprite,
@@ -323,42 +337,43 @@ ImVec2 getDownRightAbsolute(const sf::FloatRect & rect)
 // Rendering callback
 void RenderDrawLists(ImDrawData* draw_data)
 {
-    assert(s_renderTarget);
     if (draw_data->CmdListsCount == 0) {
         return;
     }
 
-    // scale stuff (needed for proper handling of window resize)
     ImGuiIO& io = ImGui::GetIO();
+    assert(io.Fonts->TexID != NULL); // You forgot to create and set font texture
+
+    // scale stuff (needed for proper handling of window resize)
     int fb_width = static_cast<int>(io.DisplaySize.x * io.DisplayFramebufferScale.x);
     int fb_height = static_cast<int>(io.DisplaySize.y * io.DisplayFramebufferScale.y);
     if (fb_width == 0 || fb_height == 0) { return; }
     draw_data->ScaleClipRects(io.DisplayFramebufferScale);
 
-    s_renderTarget->pushGLStates();
-
-    // save state
+    // Save OpenGL state
     GLint last_viewport[4]; glGetIntegerv(GL_VIEWPORT, last_viewport);
-    GLint last_texture;
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
+    GLint last_texture; glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
+    GLint last_scissor_box[4]; glGetIntegerv(GL_SCISSOR_BOX, last_scissor_box);
 
-    // do GL stuff
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_TRANSFORM_BIT);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_SCISSOR_TEST);
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-    glEnableClientState(GL_COLOR_ARRAY);
     glEnable(GL_TEXTURE_2D);
 
     glViewport(0, 0, (GLsizei)fb_width, (GLsizei)fb_height);
+
+    glMatrixMode(GL_TEXTURE);
+    glPushMatrix();
+    glLoadIdentity();
+
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
     glOrtho(0.0f, io.DisplaySize.x, io.DisplaySize.y, 0.0f, -1.0f, +1.0f);
+
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
@@ -377,10 +392,9 @@ void RenderDrawLists(ImDrawData* draw_data)
             if (pcmd->UserCallback) {
                 pcmd->UserCallback(cmd_list, pcmd);
             } else {
-                sf::Texture* texture = (sf::Texture*)pcmd->TextureId;
-                sf::Vector2u win_size = s_renderTarget->getSize();
-                sf::Texture::bind(texture);
-                glScissor((int)pcmd->ClipRect.x, (int)(win_size.y - pcmd->ClipRect.w),
+                GLuint tex_id = (GLuint)*((unsigned int*)&pcmd->TextureId);
+                glBindTexture(GL_TEXTURE_2D, tex_id);
+                glScissor((int)pcmd->ClipRect.x, (int)(fb_height - pcmd->ClipRect.w),
                     (int)(pcmd->ClipRect.z - pcmd->ClipRect.x), (int)(pcmd->ClipRect.w - pcmd->ClipRect.y));
                 glDrawElements(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, GL_UNSIGNED_SHORT, idx_buffer);
             }
@@ -389,19 +403,16 @@ void RenderDrawLists(ImDrawData* draw_data)
     }
 
     // Restore modified state
-    glDisableClientState(GL_COLOR_ARRAY);
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glBindTexture(GL_TEXTURE_2D, last_texture);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture);
+    glMatrixMode(GL_TEXTURE);
+    glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
     glPopAttrib();
     glViewport(last_viewport[0], last_viewport[1], (GLsizei)last_viewport[2], (GLsizei)last_viewport[3]);
-
-    s_renderTarget->popGLStates();
-    s_renderTarget->resetGLStates();
+    glScissor(last_scissor_box[0], last_scissor_box[1], (GLsizei)last_scissor_box[2], (GLsizei)last_scissor_box[3]);
 }
 
 bool imageButtonImpl(const sf::Texture& texture, const sf::FloatRect& textureRect, const sf::Vector2f& size, const int framePadding,
@@ -413,7 +424,7 @@ bool imageButtonImpl(const sf::Texture& texture, const sf::FloatRect& textureRec
     ImVec2 uv1((textureRect.left + textureRect.width)  / textureSize.x,
                (textureRect.top  + textureRect.height) / textureSize.y);
 
-    return ImGui::ImageButton((void*)&texture, size, uv0, uv1, framePadding, bgColor, tintColor);
+    return ImGui::ImageButton((void*)texture.getNativeHandle(), size, uv0, uv1, framePadding, bgColor, tintColor);
 }
 
 } // end of anonymous namespace
